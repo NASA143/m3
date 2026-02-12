@@ -1,0 +1,1349 @@
+Я помогу вам разработать SPA приложение для создания и совместного использования интерактивных досок на Vue 3. Учитывая ограниченное время (6 часов) и объем требований, я создам структурированное решение с ключевыми компонентами.
+
+## Структура проекта
+
+```
+source/
+├── src/
+│   ├── components/
+│   │   ├── auth/
+│   │   │   ├── LoginForm.vue
+│   │   │   └── RegisterForm.vue
+│   │   ├── board/
+│   │   │   ├── BoardCanvas.vue
+│   │   │   ├── BoardList.vue
+│   │   │   ├── BoardToolbar.vue
+│   │   │   ├── CanvasObject.vue
+│   │   │   └── PublicBoardList.vue
+│   │   └── common/
+│   │       ├── NavBar.vue
+│   │       └── ErrorMessage.vue
+│   ├── views/
+│   │   ├── Login.vue
+│   │   ├── Register.vue
+│   │   ├── Dashboard.vue
+│   │   ├── BoardView.vue
+│   │   └── PublicBoardView.vue
+│   ├── store/
+│   │   ├── auth.js
+│   │   ├── board.js
+│   │   └── websocket.js
+│   ├── services/
+│   │   ├── api.js
+│   │   ├── auth.js
+│   │   ├── board.js
+│   │   └── websocket.js
+│   ├── utils/
+│   │   ├── validators.js
+│   │   └── canvasHelpers.js
+│   ├── router/
+│   │   └── index.js
+│   ├── App.vue
+│   └── main.js
+├── index.html
+└── package.json
+```
+
+## Основные файлы реализации
+
+### package.json
+```json
+{
+  "name": "interactive-boards",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.3.0",
+    "vue-router": "^4.2.0",
+    "pinia": "^2.1.0",
+    "axios": "^1.4.0",
+    "konva": "^9.2.0",
+    "vue-konva": "^3.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^4.2.0",
+    "vite": "^4.3.0"
+  }
+}
+```
+
+### main.js
+```javascript
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import App from './App.vue'
+import router from './router'
+
+const app = createApp(App)
+const pinia = createPinia()
+
+app.use(pinia)
+app.use(router)
+app.mount('#app')
+```
+
+### services/api.js
+```javascript
+import axios from 'axios'
+
+const API_URL = process.env.VITE_API_URL || 'http://{{host}}/api'
+
+const api = axios.create({
+  baseURL: API_URL,
+  headers: {
+    'Content-Type': 'application/json',
+    'ClientId': '{{ClientId}}'
+  }
+})
+
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('token')
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('token')
+      window.location.href = '/login'
+    }
+    return Promise.reject(error)
+  }
+)
+
+export default api
+```
+
+### services/auth.js
+```javascript
+import api from './api'
+
+export const authService = {
+  async register(userData) {
+    const response = await api.post('/auth/register', userData)
+    return response.data
+  },
+
+  async login(credentials) {
+    const response = await api.post('/auth/login', credentials)
+    if (response.data.token) {
+      localStorage.setItem('token', response.data.token)
+    }
+    return response.data
+  },
+
+  logout() {
+    localStorage.removeItem('token')
+  }
+}
+```
+
+### services/board.js
+```javascript
+import api from './api'
+
+export const boardService = {
+  async createBoard(boardData) {
+    const response = await api.post('/boards', boardData)
+    return response.data
+  },
+
+  async getMyBoards() {
+    const response = await api.get('/boards/my')
+    return response.data
+  },
+
+  async getPublicBoards(filters = {}) {
+    const response = await api.get('/boards/public', { params: filters })
+    return response.data
+  },
+
+  async shareBoard(boardId, email) {
+    const response = await api.post(`/boards/${boardId}/share`, { email })
+    return response.data
+  },
+
+  async generatePublicLink(boardId) {
+    const response = await api.post(`/boards/${boardId}/public-link`)
+    return response.data
+  },
+
+  async getBoardByHash(hash) {
+    const response = await api.get(`/boards/public/${hash}`)
+    return response.data
+  },
+
+  async likeBoard(boardId) {
+    const response = await api.post(`/boards/${boardId}/like`)
+    return response.data
+  },
+
+  async unlikeBoard(boardId) {
+    const response = await api.delete(`/boards/${boardId}/like`)
+    return response.data
+  }
+}
+```
+
+### services/websocket.js
+```javascript
+import { ref } from 'vue'
+
+export class WebSocketService {
+  constructor() {
+    this.ws = null
+    this.boardId = null
+    this.isConnected = ref(false)
+    this.eventHandlers = new Map()
+  }
+
+  connect(boardId, token) {
+    this.boardId = boardId
+    const wsUrl = `ws://{{host}}/ws/boards/${boardId}?token=${token}`
+    this.ws = new WebSocket(wsUrl)
+    
+    this.ws.onopen = () => {
+      this.isConnected.value = true
+      console.log('WebSocket connected')
+    }
+
+    this.ws.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      this.handleMessage(data)
+    }
+
+    this.ws.onclose = () => {
+      this.isConnected.value = false
+      setTimeout(() => this.connect(boardId, token), 3000)
+    }
+  }
+
+  handleMessage(data) {
+    const handler = this.eventHandlers.get(data.type)
+    if (handler) {
+      handler(data.payload)
+    }
+  }
+
+  on(eventType, handler) {
+    this.eventHandlers.set(eventType, handler)
+  }
+
+  send(type, payload) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type, payload }))
+    }
+  }
+
+  disconnect() {
+    if (this.ws) {
+      this.ws.close()
+    }
+  }
+}
+
+export const websocketService = new WebSocketService()
+```
+
+### store/auth.js
+```javascript
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import { authService } from '../services/auth'
+
+export const useAuthStore = defineStore('auth', () => {
+  const user = ref(null)
+  const token = ref(localStorage.getItem('token'))
+  const errors = ref({})
+
+  async function register(userData) {
+    try {
+      errors.value = {}
+      const response = await authService.register(userData)
+      return response
+    } catch (error) {
+      if (error.response?.data?.errors) {
+        errors.value = error.response.data.errors
+      }
+      throw error
+    }
+  }
+
+  async function login(credentials) {
+    try {
+      errors.value = {}
+      const response = await authService.login(credentials)
+      user.value = response.user
+      token.value = response.token
+      return response
+    } catch (error) {
+      if (error.response?.data?.errors) {
+        errors.value = error.response.data.errors
+      }
+      throw error
+    }
+  }
+
+  function logout() {
+    authService.logout()
+    user.value = null
+    token.value = null
+  }
+
+  return { user, token, errors, register, login, logout }
+})
+```
+
+### store/board.js
+```javascript
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import { boardService } from '../services/board'
+
+export const useBoardStore = defineStore('board', () => {
+  const myBoards = ref([])
+  const publicBoards = ref([])
+  const currentBoard = ref(null)
+  const loading = ref(false)
+  const errors = ref({})
+
+  async function fetchMyBoards() {
+    try {
+      loading.value = true
+      myBoards.value = await boardService.getMyBoards()
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function fetchPublicBoards(filters = {}) {
+    try {
+      loading.value = true
+      publicBoards.value = await boardService.getPublicBoards(filters)
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function createBoard(boardData) {
+    try {
+      errors.value = {}
+      const newBoard = await boardService.createBoard(boardData)
+      myBoards.value.push(newBoard)
+      return newBoard
+    } catch (error) {
+      if (error.response?.data?.errors) {
+        errors.value = error.response.data.errors
+      }
+      throw error
+    }
+  }
+
+  async function shareBoard(boardId, email) {
+    try {
+      errors.value = {}
+      const result = await boardService.shareBoard(boardId, email)
+      const board = myBoards.value.find(b => b.id === boardId)
+      if (board) {
+        board.sharedWith = [...(board.sharedWith || []), result.sharedUser]
+      }
+      return result
+    } catch (error) {
+      if (error.response?.data?.errors) {
+        errors.value = error.response.data.errors
+      }
+      throw error
+    }
+  }
+
+  async function generatePublicLink(boardId) {
+    try {
+      const result = await boardService.generatePublicLink(boardId)
+      const board = myBoards.value.find(b => b.id === boardId)
+      if (board) {
+        board.publicHash = result.hash
+      }
+      return result
+    } catch (error) {
+      throw error
+    }
+  }
+
+  async function likeBoard(boardId) {
+    try {
+      await boardService.likeBoard(boardId)
+      const board = publicBoards.value.find(b => b.id === boardId)
+      if (board) {
+        board.likes++
+        board.isLiked = true
+      }
+    } catch (error) {
+      throw error
+    }
+  }
+
+  return {
+    myBoards,
+    publicBoards,
+    currentBoard,
+    loading,
+    errors,
+    fetchMyBoards,
+    fetchPublicBoards,
+    createBoard,
+    shareBoard,
+    generatePublicLink,
+    likeBoard
+  }
+})
+```
+
+### utils/validators.js
+```javascript
+export const validators = {
+  email(value) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    return emailRegex.test(value) ? null : 'Введите корректный email'
+  },
+
+  name(value) {
+    const nameRegex = /^[a-zA-Z]+$/
+    return nameRegex.test(value) ? null : 'Имя должно содержать только латиницу'
+  },
+
+  password(value) {
+    if (value.length < 8) {
+      return 'Пароль должен содержать минимум 8 символов'
+    }
+    if (!/\d/.test(value)) {
+      return 'Пароль должен содержать хотя бы одну цифру'
+    }
+    if (!/[!@#$%^&*]/.test(value)) {
+      return 'Пароль должен содержать хотя бы один спецсимвол'
+    }
+    return null
+  }
+}
+```
+
+### components/auth/LoginForm.vue
+```vue
+<template>
+  <form @submit.prevent="handleSubmit" class="login-form">
+    <h2>Вход в систему</h2>
+    
+    <div class="form-group">
+      <label for="email">Email</label>
+      <input
+        id="email"
+        v-model="form.email"
+        type="email"
+        :class="{ error: errors.email }"
+        @input="clearError('email')"
+      />
+      <span class="error-message" v-if="errors.email">{{ errors.email }}</span>
+    </div>
+
+    <div class="form-group">
+      <label for="password">Пароль</label>
+      <input
+        id="password"
+        v-model="form.password"
+        type="password"
+        :class="{ error: errors.password }"
+        @input="clearError('password')"
+      />
+      <span class="error-message" v-if="errors.password">{{ errors.password }}</span>
+    </div>
+
+    <button type="submit" :disabled="loading">
+      {{ loading ? 'Вход...' : 'Войти' }}
+    </button>
+
+    <router-link to="/register" class="register-link">
+      Нет аккаунта? Зарегистрироваться
+    </router-link>
+  </form>
+</template>
+
+<script setup>
+import { ref, reactive } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '../../store/auth'
+
+const router = useRouter()
+const authStore = useAuthStore()
+const loading = ref(false)
+
+const form = reactive({
+  email: '',
+  password: ''
+})
+
+const errors = reactive({})
+
+async function handleSubmit() {
+  loading.value = true
+  try {
+    await authStore.login(form)
+    router.push('/dashboard')
+  } catch (error) {
+    if (error.response?.data?.errors) {
+      Object.assign(errors, error.response.data.errors)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+function clearError(field) {
+  delete errors[field]
+}
+</script>
+
+<style scoped>
+.login-form {
+  max-width: 400px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.form-group {
+  margin-bottom: 1rem;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.form-group input.error {
+  border-color: #ff4444;
+}
+
+.error-message {
+  color: #ff4444;
+  font-size: 0.875rem;
+  margin-top: 0.25rem;
+  display: block;
+}
+
+button {
+  width: 100%;
+  padding: 0.75rem;
+  background: #4CAF50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.register-link {
+  display: block;
+  text-align: center;
+  margin-top: 1rem;
+  color: #4CAF50;
+  text-decoration: none;
+}
+</style>
+```
+
+### components/auth/RegisterForm.vue
+```vue
+<template>
+  <form @submit.prevent="handleSubmit" class="register-form">
+    <h2>Регистрация</h2>
+    
+    <div class="form-group">
+      <label for="email">Email</label>
+      <input
+        id="email"
+        v-model="form.email"
+        type="email"
+        :class="{ error: errors.email }"
+        @input="clearError('email')"
+      />
+      <span class="error-message" v-if="errors.email">{{ errors.email }}</span>
+    </div>
+
+    <div class="form-group">
+      <label for="name">Имя</label>
+      <input
+        id="name"
+        v-model="form.name"
+        type="text"
+        :class="{ error: errors.name }"
+        @input="clearError('name')"
+      />
+      <span class="error-message" v-if="errors.name">{{ errors.name }}</span>
+    </div>
+
+    <div class="form-group">
+      <label for="password">Пароль</label>
+      <input
+        id="password"
+        v-model="form.password"
+        type="password"
+        :class="{ error: errors.password }"
+        @input="clearError('password')"
+      />
+      <span class="error-message" v-if="errors.password">{{ errors.password }}</span>
+    </div>
+
+    <div class="form-group">
+      <label for="confirmPassword">Подтверждение пароля</label>
+      <input
+        id="confirmPassword"
+        v-model="form.confirmPassword"
+        type="password"
+        :class="{ error: errors.confirmPassword }"
+        @input="clearError('confirmPassword')"
+      />
+      <span class="error-message" v-if="errors.confirmPassword">{{ errors.confirmPassword }}</span>
+    </div>
+
+    <button type="submit" :disabled="loading">
+      {{ loading ? 'Регистрация...' : 'Зарегистрироваться' }}
+    </button>
+
+    <router-link to="/login" class="login-link">
+      Уже есть аккаунт? Войти
+    </router-link>
+  </form>
+</template>
+
+<script setup>
+import { ref, reactive } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '../../store/auth'
+import { validators } from '../../utils/validators'
+
+const router = useRouter()
+const authStore = useAuthStore()
+const loading = ref(false)
+
+const form = reactive({
+  email: '',
+  name: '',
+  password: '',
+  confirmPassword: ''
+})
+
+const errors = reactive({})
+
+async function handleSubmit() {
+  // Валидация на клиенте
+  errors.email = validators.email(form.email)
+  errors.name = validators.name(form.name)
+  errors.password = validators.password(form.password)
+  
+  if (form.password !== form.confirmPassword) {
+    errors.confirmPassword = 'Пароли не совпадают'
+  }
+
+  if (Object.values(errors).some(error => error !== null)) {
+    return
+  }
+
+  loading.value = true
+  try {
+    const { confirmPassword, ...userData } = form
+    await authStore.register(userData)
+    router.push('/login')
+  } catch (error) {
+    if (error.response?.data?.errors) {
+      Object.assign(errors, error.response.data.errors)
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+function clearError(field) {
+  delete errors[field]
+}
+</script>
+
+<style scoped>
+.register-form {
+  max-width: 400px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.form-group {
+  margin-bottom: 1rem;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.form-group input.error {
+  border-color: #ff4444;
+}
+
+.error-message {
+  color: #ff4444;
+  font-size: 0.875rem;
+  margin-top: 0.25rem;
+  display: block;
+}
+
+button {
+  width: 100%;
+  padding: 0.75rem;
+  background: #4CAF50;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.login-link {
+  display: block;
+  text-align: center;
+  margin-top: 1rem;
+  color: #4CAF50;
+  text-decoration: none;
+}
+</style>
+```
+
+### components/board/BoardCanvas.vue
+```vue
+<template>
+  <div class="board-container">
+    <div class="board-header">
+      <h2>{{ board?.name }}</h2>
+      <div class="board-info">
+        <span v-if="websocketService.isConnected.value" class="status online">
+          ● В реальном времени
+        </span>
+        <span v-else class="status offline">
+          ○ Офлайн
+        </span>
+        <button v-if="isOwner" @click="generatePublicLink" class="btn-share">
+          Создать публичную ссылку
+        </button>
+      </div>
+    </div>
+
+    <div class="canvas-wrapper" ref="canvasWrapper">
+      <div 
+        class="canvas-container"
+        :style="{
+          width: '1600px',
+          height: '900px'
+        }"
+      >
+        <v-stage
+          ref="stage"
+          :config="stageConfig"
+          @mousedown="handleStageMouseDown"
+        >
+          <v-layer ref="layer">
+            <!-- Фон холста -->
+            <v-rect
+              :config="{
+                x: 0,
+                y: 0,
+                width: 1600,
+                height: 900,
+                fill: '#f5f5f5',
+                stroke: '#ccc',
+                strokeWidth: 1
+              }"
+            />
+            
+            <!-- Объекты на холсте -->
+            <canvas-object
+              v-for="obj in objects"
+              :key="obj.id"
+              :object="obj"
+              :isFocused="focusedObject?.id === obj.id"
+              :focusUser="focusedObject?.user"
+              :isEditable="canEdit && (!focusedObject || focusedObject.id === obj.id || focusedObject.user === currentUser)"
+              @select="selectObject"
+              @update="updateObject"
+              @focus="focusObject"
+              @blur="blurObject"
+            />
+          </v-layer>
+        </v-stage>
+      </div>
+    </div>
+
+    <board-toolbar
+      v-if="canEdit"
+      @add-object="addObject"
+    />
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
+import { useAuthStore } from '../../store/auth'
+import { websocketService } from '../../services/websocket'
+import { boardService } from '../../services/board'
+import CanvasObject from './CanvasObject.vue'
+import BoardToolbar from './BoardToolbar.vue'
+
+const props = defineProps({
+  boardId: {
+    type: String,
+    required: true
+  },
+  isPublic: {
+    type: Boolean,
+    default: false
+  }
+})
+
+const route = useRoute()
+const authStore = useAuthStore()
+
+const stage = ref(null)
+const layer = ref(null)
+const canvasWrapper = ref(null)
+
+const stageConfig = reactive({
+  width: 1600,
+  height: 900,
+  draggable: false
+})
+
+const board = ref(null)
+const objects = ref([])
+const focusedObject = ref(null)
+const currentUser = authStore.user
+
+const canEdit = computed(() => {
+  if (props.isPublic) return false
+  return board.value?.ownerId === currentUser?.id || 
+         board.value?.sharedWith?.some(u => u.id === currentUser?.id)
+})
+
+const isOwner = computed(() => board.value?.ownerId === currentUser?.id)
+
+// WebSocket обработчики
+function setupWebSocket() {
+  const token = localStorage.getItem('token')
+  
+  websocketService.connect(props.boardId, token)
+  
+  websocketService.on('object_added', (data) => {
+    objects.value.push(data.object)
+  })
+  
+  websocketService.on('object_updated', (data) => {
+    const index = objects.value.findIndex(obj => obj.id === data.object.id)
+    if (index !== -1) {
+      objects.value[index] = data.object
+    }
+  })
+  
+  websocketService.on('object_focused', (data) => {
+    if (data.userId !== currentUser?.id) {
+      focusedObject.value = {
+        id: data.objectId,
+        user: data.userName
+      }
+    }
+  })
+  
+  websocketService.on('object_blurred', (data) => {
+    if (focusedObject.value?.id === data.objectId) {
+      focusedObject.value = null
+    }
+  })
+}
+
+// Загрузка доски
+async function loadBoard() {
+  try {
+    if (props.isPublic) {
+      const hash = route.params.hash
+      board.value = await boardService.getBoardByHash(hash)
+    } else {
+      // Загрузка приватной доски
+      board.value = await boardService.getBoard(props.boardId)
+    }
+    objects.value = board.value.objects || []
+  } catch (error) {
+    console.error('Failed to load board:', error)
+  }
+}
+
+// Добавление объекта
+function addObject(type) {
+  const newObject = {
+    id: Date.now().toString(),
+    type,
+    x: 100,
+    y: 100,
+    width: type === 'line' ? 100 : 100,
+    height: type === 'line' ? 2 : 100,
+    rotation: 0,
+    fill: '#000000',
+    stroke: '#000000',
+    text: type === 'text' ? 'Текст' : undefined,
+    src: type === 'image' ? 'https://via.placeholder.com/100' : undefined
+  }
+  
+  objects.value.push(newObject)
+  websocketService.send('object_added', { object: newObject })
+}
+
+// Выбор объекта
+function selectObject(object) {
+  if (!canEdit) return
+  
+  // Проверяем, не занят ли объект другим пользователем
+  if (focusedObject.value && 
+      focusedObject.value.id === object.id && 
+      focusedObject.value.user !== currentUser?.name) {
+    return
+  }
+}
+
+// Фокус на объекте
+function focusObject(object) {
+  if (!canEdit) return
+  
+  // Проверяем, не занят ли объект
+  if (focusedObject.value && 
+      focusedObject.value.id !== object.id && 
+      focusedObject.value.user !== currentUser?.name) {
+    return
+  }
+  
+  focusedObject.value = {
+    id: object.id,
+    user: currentUser?.name
+  }
+  
+  websocketService.send('object_focused', { 
+    objectId: object.id 
+  })
+}
+
+// Снятие фокуса
+function blurObject(object) {
+  if (focusedObject.value?.id === object.id) {
+    focusedObject.value = null
+    websocketService.send('object_blurred', { 
+      objectId: object.id 
+    })
+  }
+}
+
+// Обновление объекта
+function updateObject(updatedObject) {
+  const index = objects.value.findIndex(obj => obj.id === updatedObject.id)
+  if (index !== -1) {
+    objects.value[index] = updatedObject
+    websocketService.send('object_updated', { object: updatedObject })
+  }
+}
+
+// Генерация публичной ссылки
+async function generatePublicLink() {
+  try {
+    const result = await boardService.generatePublicLink(board.value.id)
+    const link = `${window.location.origin}/board/public/${result.hash}`
+    await navigator.clipboard.writeText(link)
+    alert('Публичная ссылка скопирована в буфер обмена!')
+  } catch (error) {
+    console.error('Failed to generate public link:', error)
+  }
+}
+
+// Обработка клика по холсту (снятие фокуса)
+function handleStageMouseDown(e) {
+  if (e.target === stage.value.getNode()) {
+    if (focusedObject.value) {
+      websocketService.send('object_blurred', { 
+        objectId: focusedObject.value.id 
+      })
+      focusedObject.value = null
+    }
+  }
+}
+
+onMounted(async () => {
+  await loadBoard()
+  if (!props.isPublic) {
+    setupWebSocket()
+  }
+})
+
+onUnmounted(() => {
+  websocketService.disconnect()
+})
+</script>
+
+<style scoped>
+.board-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.board-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  background: white;
+  border-bottom: 1px solid #ccc;
+}
+
+.board-info {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.status {
+  font-size: 0.875rem;
+}
+
+.status.online {
+  color: #4CAF50;
+}
+
+.status.offline {
+  color: #ff4444;
+}
+
+.btn-share {
+  padding: 0.5rem 1rem;
+  background: #2196F3;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.canvas-wrapper {
+  flex: 1;
+  overflow: auto;
+  background: #e0e0e0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.canvas-container {
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+  background: white;
+}
+</style>
+```
+
+### components/board/CanvasObject.vue
+```vue
+<template>
+  <v-group
+    :config="groupConfig"
+    @dragmove="handleDragMove"
+    @dragend="handleDragEnd"
+    @transformend="handleTransformEnd"
+    @click="handleClick"
+  >
+    <!-- Текст -->
+    <v-text
+      v-if="object.type === 'text'"
+      :config="textConfig"
+    />
+    
+    <!-- Прямоугольник -->
+    <v-rect
+      v-else-if="object.type === 'rectangle'"
+      :config="shapeConfig"
+    />
+    
+    <!-- Круг -->
+    <v-circle
+      v-else-if="object.type === 'circle'"
+      :config="circleConfig"
+    />
+    
+    <!-- Линия -->
+    <v-line
+      v-else-if="object.type === 'line'"
+      :config="lineConfig"
+    />
+    
+    <!-- Изображение -->
+    <v-image
+      v-else-if="object.type === 'image'"
+      :config="imageConfig"
+      @load="handleImageLoad"
+    />
+    
+    <!-- Индикатор фокуса -->
+    <v-rect
+      v-if="isFocused"
+      :config="focusRectConfig"
+    />
+    
+    <!-- Подпись с именем пользователя -->
+    <v-text
+      v-if="focusUser"
+      :config="focusLabelConfig"
+    />
+  </v-group>
+</template>
+
+<script setup>
+import { ref, computed, watch } from 'vue'
+
+const props = defineProps({
+  object: {
+    type: Object,
+    required: true
+  },
+  isFocused: {
+    type: Boolean,
+    default: false
+  },
+  focusUser: {
+    type: String,
+    default: null
+  },
+  isEditable: {
+    type: Boolean,
+    default: false
+  }
+})
+
+const emit = defineEmits(['select', 'update', 'focus', 'blur'])
+
+const image = ref(null)
+
+// Конфигурация группы
+const groupConfig = computed(() => ({
+  x: props.object.x,
+  y: props.object.y,
+  rotation: props.object.rotation,
+  draggable: props.isEditable && props.isFocused,
+  dragBoundFunc: (pos) => {
+    // Ограничение перемещения в пределах холста
+    const newX = Math.max(0, Math.min(1600 - props.object.width, pos.x))
+    const newY = Math.max(0, Math.min(900 - props.object.height, pos.y))
+    return { x: newX, y: newY }
+  }
+}))
+
+// Конфигурация текста
+const textConfig = computed(() => ({
+  text: props.object.text,
+  fontSize: 16,
+  fontFamily: 'Arial',
+  fill: props.object.fill,
+  width: props.object.width,
+  height: props.object.height,
+  padding: 5
+}))
+
+// Конфигурация фигур
+const shapeConfig = computed(() => ({
+  width: props.object.width,
+  height: props.object.height,
+  fill: props.object.fill,
+  stroke: props.object.stroke,
+  strokeWidth: 1,
+  cornerRadius: props.object.type === 'rectangle' ? 0 : undefined
+}))
+
+const circleConfig = computed(() => ({
+  radius: Math.min(props.object.width, props.object.height) / 2,
+  fill: props.object.fill,
+  stroke: props.object.stroke,
+  strokeWidth: 1
+}))
+
+const lineConfig = computed(() => ({
+  points: [0, 0, props.object.width, 0],
+  stroke: props.object.stroke,
+  strokeWidth: 2
+}))
+
+const imageConfig = computed(() => ({
+  image: image.value,
+  width: props.object.width,
+  height: props.object.height
+}))
+
+// Конфигурация рамки фокуса
+const focusRectConfig = computed(() => ({
+  x: -5,
+  y: -5,
+  width: props.object.width + 10,
+  height: props.object.height + 10,
+  stroke: '#2196F3',
+  strokeWidth: 2,
+  dash: [5, 5]
+}))
+
+// Конфигурация подписи
+const focusLabelConfig = computed(() => ({
+  x: 0,
+  y: -25,
+  text: `Редактирует: ${props.focusUser}`,
+  fontSize: 12,
+  fontFamily: 'Arial',
+  fill: '#2196F3'
+}))
+
+// Загрузка изображения
+function loadImage() {
+  if (props.object.type === 'image' && props.object.src) {
+    const img = new window.Image()
+    img.src = props.object.src
+    img.onload = () => {
+      image.value = img
+    }
+  }
+}
+
+// Обработка загрузки изображения
+function handleImageLoad() {
+  // Сохраняем соотношение сторон
+  if (image.value) {
+    const aspectRatio = image.value.width / image.value.height
+    emit('update', {
+      ...props.object,
+      width: props.object.width || 100,
+      height: props.object.width / aspectRatio
+    })
+  }
+}
+
+// Обработка перемещения
+function handleDragMove(e) {
+  const node = e.target
+  emit('update', {
+    ...props.object,
+    x: node.x(),
+    y: node.y()
+  })
+}
+
+function handleDragEnd(e) {
+  const node = e.target
+  emit('update', {
+    ...props.object,
+    x: node.x(),
+    y: node.y()
+  })
+}
+
+// Обработка изменения размера
+function handleTransformEnd(e) {
+  const node = e.target
+  const scaleX = node.scaleX()
+  const scaleY = node.scaleY()
+  
+  node.scaleX(1)
+  node.scaleY(1)
+  
+  const updatedObject = {
+    ...props.object,
+    x: node.x(),
+    y: node.y(),
+    rotation: node.rotation(),
+    width: Math.max(10, props.object.width * scaleX),
+    height: props.object.type === 'image' 
+      ? props.object.height * scaleY 
+      : Math.max(10, props.object.height * scaleY)
+  }
+  
+  // Для изображений сохраняем соотношение сторон
+  if (props.object.type === 'image') {
+    const aspectRatio = props.object.width / props.object.height
+    if (Math.abs(scaleX) > Math.abs(scaleY)) {
+      updatedObject.height = updatedObject.width / aspectRatio
+    } else {
+      updatedObject.width = updatedObject.height * aspectRatio
+    }
+  }
+  
+  emit('update', updatedObject)
+}
+
+// Обработка клика
+function handleClick(e) {
+  emit('select', props.object)
+  
+  if (props.isEditable) {
+    if (!props.isFocused) {
+      emit('focus', props.object)
+    }
+  }
+  e.cancelBubble = true
+}
+
+// Загружаем изображение при монтировании
+watch(() => props.object.src, loadImage, { immediate: true })
+</script>
+```
+
+### components/board/BoardList.vue
+```vue
+<template>
+  <div class="board-list">
+    <div class="board-list-header">
+      <h2>Мои доски</h2>
+      <button @click="showCreateDialog = true" class="btn-create">
+        Создать доску
+      </button>
+    </div>
+
+    <div v-if="loading" class="loading">
+      Загрузка...
+    </div>
+
+    <div v-else-if="boards.length === 0" class="empty-state">
+      <p>У вас пока нет досок</p>
+    </div>
+
+    <div v-else class="boards-grid">
+      <div v-for="board in boards" :key="board.id
